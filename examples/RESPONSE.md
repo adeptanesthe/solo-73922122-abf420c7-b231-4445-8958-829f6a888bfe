@@ -5,7 +5,19 @@ Run ``python examples/demo_request.py --offline`` to regenerate
 
     curl -sS -X POST http://localhost:8000/v1/compose \
          -H 'Content-Type: application/json' \
-         --data @examples/request.json
+         --data @examples/out/request.json
+
+``examples/reselect_request.json`` is a committed one-patch request that
+demonstrates the base-instance visibility floor changing the chosen placement:
+
+    curl -sS -X POST http://localhost:8000/v1/compose \
+         -H 'Content-Type: application/json' \
+         --data @examples/reselect_request.json
+
+    -> position [228, 124], overlapped_base_pixels 1672,
+       base_instances[0] 256/256 visible (the tiny jar that would otherwise
+       be fully hidden by the cheaper candidate [0, 0]),
+       base_instances[1] 3192/4864 visible (65.6 %).
 
 Response shape (trimmed; masks and the image are elided):
 
@@ -26,5 +38,5 @@ Response shape (trimmed; masks and the image are elided):
 
 The infeasible branch returns ``{"status": "infeasible", "reason": "..."}``
 with no image, for example when every candidate clips a patch below half of
-its mask area.
+its mask area or would hide more than half of an annotated base instance.
 """

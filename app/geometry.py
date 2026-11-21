@@ -11,10 +11,16 @@ Semantics
   *original* mask pixel count after clipping and occlusion, otherwise the
   candidate combination is infeasible. The floor is applied with integer
   arithmetic, so exactly half is feasible.
+* Every already-annotated base instance must keep at least half of its own
+  original mask area as well; a placement that covers more of any single
+  annotation is rejected, even if it covers the fewest annotated pixels
+  overall. A pixel hidden by several pasted layers counts once, so base
+  visibility is computed from the union of the pasted visible masks.
 * Among feasible combinations the search minimises the number of annotated
   base pixels covered by pasted instances (union, not sum). Ties are broken by
-  maximising the smallest visible-area margin, then by candidate order, which
-  makes the result deterministic.
+  maximising the smallest patch visibility margin, then by candidate order,
+  which makes the result deterministic. The base-instance floor is a filter
+  only; it does not change the ranking of otherwise feasible placements.
 
 The search is exhaustive over at most 5^4 = 625 candidate combinations. The
 objective is not separable because a later patch can hide an earlier one and
@@ -27,8 +33,17 @@ The DFS walks patches top-most first while maintaining the union of already
 placed (later) masks. When patch ``i`` is placed, every patch that can hide it
 is already in the union, so its final visible count and its incremental
 coverage of annotated pixels are both exact and can be used to prune
-immediately. Per-node work is proportional to patch area; canvas-sized arrays
-are allocated once and mutated with exact backtracking.
+immediately. Per-node work is proportional to the candidate's on-canvas box
+(patch area), never to the full canvas: base-instance occlusion is accumulated
+per placed patch by counting the *newly* covered pixels inside that candidate's
+box, via a precomputed base-instance owner map. Canvas-sized arrays are
+allocated once and mutated with exact backtracking.
+
+Because pasted coverage only grows while descending, a branch is cut as soon
+as any base instance has already lost more than its allowed area. The check is
+a union count (a base pixel covered by several layers is counted once), and
+the same combination is re-rendered afterwards, so image, positions, visible
+masks and areas always describe one placement.
 """
 
 from __future__ import annotations
@@ -43,6 +58,8 @@ import numpy as np
 from PIL import Image, ImageFile, UnidentifiedImageError
 
 from .config import (
+    BASE_MIN_VISIBLE_DENOMINATOR,
+    BASE_MIN_VISIBLE_NUMERATOR,
     MAX_BASE_INSTANCES,
     MAX_IMAGE_BYTES,
     MAX_IMAGE_PIXELS,
@@ -294,12 +311,26 @@ class _Search:
         self.height, self.width = canvas_shape
         # Union of masks of patches placed so far (i.e. later layers).
         self.union = np.zeros(canvas_shape, dtype=bool)
+        # Index (1-based) of the base instance owning each canvas pixel, 0 for
+        # non-annotated pixels. Base instance masks are validated disjoint, so
+        # every canvas pixel belongs to at most one base instance.
+        if base.masks:
+            self.base_owner = np.zeros(canvas_shape, dtype=np.int32)
+            for index, mask in enumerate(base.masks):
+                self.base_owner[mask] = index + 1
+        else:
+            self.base_owner = np.zeros((0, 0), dtype=np.int32)
+        # Newly covered pixels per base instance for the combo on the stack.
+        self.base_covered = [0] * len(base.masks)
         self.covered_annotated = 0
         self.evaluated = 0
         # Final visible count per patch for the combo currently on the stack.
         self.visible_now = [0] * len(prepared)
         self.best_key: tuple[int, int, tuple[int, ...]] | None = None
         self.best_combo: tuple[int, ...] | None = None
+        # True when at least one combination was discarded because a base
+        # instance would have dropped below its visibility floor.
+        self.rejected_for_base_visibility = False
 
     # -- DFS -----------------------------------------------------------------
     def run(self) -> tuple[Solution | None, str | None]:
@@ -313,6 +344,12 @@ class _Search:
             )
         self._visit(len(self.prepared) - 1, [0] * len(self.prepared))
         if self.best_combo is None:
+            if self.rejected_for_base_visibility:
+                return None, (
+                    "no candidate combination keeps at least half of every "
+                    "pasted product instance's original mask area and at least "
+                    "half of every annotated base instance's area"
+                )
             return None, (
                 "no candidate combination keeps at least half of every product "
                 "instance's original mask area"
@@ -323,7 +360,8 @@ class _Search:
         if index < 0:
             self.evaluated += 1
             slack = min(
-                2 * self.visible_now[i] - patch.original_pixels
+                PATCH_MIN_VISIBLE_DENOMINATOR * self.visible_now[i]
+                - PATCH_MIN_VISIBLE_NUMERATOR * patch.original_pixels
                 for i, patch in enumerate(self.prepared)
             )
             key = (self.covered_annotated, -slack, tuple(combo))
@@ -346,15 +384,64 @@ class _Search:
                 < PATCH_MIN_VISIBLE_NUMERATOR * patch.original_pixels
             ):
                 continue
-            covered_now = int(np.count_nonzero(new & annotated[r0:r1, c0:c1]))
+            covered_now, counts_list = self._account_base_coverage(
+                new, (r0, r1, c0, c1)
+            )
+            if not self._base_floor_holds():
+                # Coverage only grows while descending, so no deeper candidate
+                # can recover a base instance that is already below the floor.
+                self.rejected_for_base_visibility = True
+                self._undo_base_counts(counts_list)
+                continue
             union_view |= new
             self.covered_annotated += covered_now
             combo[index] = candidate_index
             self.visible_now[index] = visible
             self._visit(index - 1, combo)
             self.covered_annotated -= covered_now
+            self._undo_base_counts(counts_list)
             union_view &= ~new
         combo[index] = 0
+
+    def _account_base_coverage(
+        self, newly_covered: np.ndarray, box: Box
+    ) -> tuple[int, list[int]]:
+        """Count annotation pixels hidden by this layer, per base instance.
+
+        ``newly_covered`` excludes pixels already covered by a later layer, so
+        a base pixel hidden by several layers is counted once, attributed to
+        the top-most covering patch. Work is confined to the candidate's
+        on-canvas box and, inside it, to annotated pixels only.
+        """
+
+        r0, r1, c0, c1 = box
+        hit = newly_covered & self.base.annotated[r0:r1, c0:c1]
+        covered_now = int(np.count_nonzero(hit))
+        if not self.base.masks or covered_now == 0:
+            return covered_now, [0] * (len(self.base_covered) + 1)
+        owners = self.base_owner[r0:r1, c0:c1][hit]
+        counts = np.bincount(owners, minlength=len(self.base_covered) + 1).tolist()
+        # Index 0 is background; instance ids start at 1 and are in range
+        # because base instance masks are validated pairwise disjoint.
+        for base_index in range(len(self.base_covered)):
+            self.base_covered[base_index] += counts[base_index + 1]
+        return covered_now, counts
+
+    def _undo_base_counts(self, counts_list: Sequence[int]) -> None:
+        for base_index in range(len(self.base_covered)):
+            hidden = counts_list[base_index + 1]
+            if hidden:
+                self.base_covered[base_index] -= hidden
+
+    def _base_floor_holds(self) -> bool:
+        for base_index, original in enumerate(self.base.original_pixels):
+            visible = original - self.base_covered[base_index]
+            if (
+                BASE_MIN_VISIBLE_DENOMINATOR * visible
+                < BASE_MIN_VISIBLE_NUMERATOR * original
+            ):
+                return False
+        return True
 
     # -- rendering -----------------------------------------------------------
     def _render(self) -> Solution:

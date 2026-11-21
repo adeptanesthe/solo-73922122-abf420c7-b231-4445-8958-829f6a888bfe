@@ -27,7 +27,8 @@ app = FastAPI(
     description=(
         "Composites masked product patches onto a shelf base image in back-to-front "
         "order, choosing candidate placements that cover the fewest annotated base "
-        "pixels while every instance keeps at least half of its original mask area."
+        "pixels while every pasted instance and every annotated base instance keeps "
+        "at least half of its original mask area."
     ),
 )
 
@@ -141,7 +142,8 @@ def health() -> dict[str, str]:
         200: {
             "description": (
                 "A feasible composite, or an {'status': 'infeasible'} report with no "
-                "image when no placement keeps half of every instance's mask."
+                "image when no placement keeps half of every pasted instance's mask "
+                "and half of every annotated base instance's mask."
             )
         },
         413: {"description": "Request body above the configured limit."},

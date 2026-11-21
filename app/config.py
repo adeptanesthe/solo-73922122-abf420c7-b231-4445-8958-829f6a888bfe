@@ -16,6 +16,11 @@ MAX_SEARCH_NODES = MAX_CANDIDATES**MAX_PATCHES
 MIN_VISIBLE_NUMERATOR = 1
 MIN_VISIBLE_DENOMINATOR = 2
 
+# Every already-annotated base instance must likewise keep at least half of
+# its original mask area; a placement that hides more is rejected outright.
+MIN_BASE_VISIBLE_NUMERATOR = 1
+MIN_BASE_VISIBLE_DENOMINATOR = 2
+
 
 def _int_env(name: str, default: int, *, minimum: int) -> int:
     raw = os.environ.get(name)
@@ -56,5 +61,13 @@ MAX_REQUEST_BYTES = _int_env("MAX_REQUEST_BYTES", 32 * 1024 * 1024, minimum=1024
 # override exists so the threshold can be exercised in tests.
 PATCH_MIN_VISIBLE_NUMERATOR, PATCH_MIN_VISIBLE_DENOMINATOR = _ratio_env(
     "MIN_VISIBLE_RATIO", MIN_VISIBLE_NUMERATOR, MIN_VISIBLE_DENOMINATOR
+)
+
+# Feasibility floor for pre-annotated base instances. The task fixes it at one
+# half; the override exists so the threshold can be exercised in tests.
+BASE_MIN_VISIBLE_NUMERATOR, BASE_MIN_VISIBLE_DENOMINATOR = _ratio_env(
+    "MIN_BASE_VISIBLE_RATIO",
+    MIN_BASE_VISIBLE_NUMERATOR,
+    MIN_BASE_VISIBLE_DENOMINATOR,
 )
 

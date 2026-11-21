@@ -15,6 +15,8 @@ import pytest
 
 from app import geometry
 from app.config import (
+    BASE_MIN_VISIBLE_DENOMINATOR,
+    BASE_MIN_VISIBLE_NUMERATOR,
     PATCH_MIN_VISIBLE_DENOMINATOR,
     PATCH_MIN_VISIBLE_NUMERATOR,
 )
@@ -50,6 +52,16 @@ def reference_solve(base, patches):
             PATCH_MIN_VISIBLE_DENOMINATOR * int(count)
             < PATCH_MIN_VISIBLE_NUMERATOR * int(mask.sum())
             for count, (_, mask, _) in zip(visible, patches)
+        ):
+            continue
+        occupied = labels != 0
+        base_visible = [
+            int(np.count_nonzero(mask & ~occupied)) for mask in base.masks
+        ]
+        if any(
+            BASE_MIN_VISIBLE_DENOMINATOR * seen
+            < BASE_MIN_VISIBLE_NUMERATOR * int(mask.sum())
+            for seen, mask in zip(base_visible, base.masks)
         ):
             continue
         cost = int(np.count_nonzero((labels != 0) & base.annotated))

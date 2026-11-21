@@ -121,6 +121,67 @@ def test_annotation_avoidance_through_api(client):
     assert data["overlapped_base_pixels"] == 0
 
 
+def test_cheapest_placement_is_rejected_when_it_hides_a_small_annotation(client):
+    # A 2x2 annotated instance at the top-left and a 10x10 one at (20, 20).
+    small = np.zeros((40, 40), dtype=bool)
+    small[0:2, 0:2] = True
+    large = np.zeros((40, 40), dtype=bool)
+    large[20:30, 20:30] = True
+    body = {
+        "base": base_payload(40, 40, [small, large]),
+        "patches": [patch_payload(3, 3, [(0, 0), (20, 20)], value=90)],
+    }
+    response = client.post("/v1/compose", json=body)
+    data = response.json()
+    # Covering the small instance would hide 4 annotated pixels (cheapest by
+    # area) but leaves it 0/4 visible, so the placement must move to (20, 20),
+    # covering 9 pixels of the 100-pixel instance (91 % still visible).
+    assert data["status"] == "ok"
+    assert data["instances"][0]["position"] == [20, 20]
+    assert data["overlapped_base_pixels"] == 9
+    assert [item["visible_pixels"] for item in data["base_instances"]] == [4, 91]
+    for item in data["base_instances"]:
+        assert item["visible_pixels"] * 2 >= item["original_mask_pixels"]
+    # Reported masks agree with the reported numbers.
+    visible = [decode_b64_png(item["visible_mask_b64"]) for item in data["base_instances"]]
+    assert [int((m > 0).sum()) for m in visible] == [4, 91]
+    instance_mask = decode_b64_png(data["instances"][0]["visible_mask_b64"])
+    assert int((instance_mask > 0).sum()) == 9
+    assert not np.any((instance_mask > 0) & (visible[1] > 0))
+
+
+def test_infeasible_only_because_of_base_visibility(client):
+    annotation = np.zeros((8, 8), dtype=bool)
+    annotation[0:2, 0:2] = True
+    body = {
+        "base": base_payload(8, 8, [annotation]),
+        "patches": [patch_payload(2, 2, [(0, 0)])],
+    }
+    data = client.post("/v1/compose", json=body).json()
+    assert data["status"] == "infeasible"
+    assert "annotated base instance" in data["reason"]
+    assert "composed_image_b64" not in data
+    assert "instances" not in data
+
+
+def test_committed_reselect_demo_request_is_in_sync(client):
+    # The committed curl example must exercise the base-instance floor: the
+    # cheaper candidate (0, 0) would hide a 256-pixel jar completely, so the
+    # response must use (228, 124) and keep the jar 256/256 visible.
+    import json
+    from pathlib import Path
+
+    request_path = Path(__file__).resolve().parents[1] / "examples" / "reselect_request.json"
+    response = client.post("/v1/compose", json=json.loads(request_path.read_text()))
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["status"] == "ok"
+    assert data["instances"][0]["position"] == [228, 124]
+    assert data["overlapped_base_pixels"] == 1672
+    assert [item["visible_pixels"] for item in data["base_instances"]] == [256, 3192]
+    assert [item["original_mask_pixels"] for item in data["base_instances"]] == [256, 4864]
+
+
 def test_too_many_patches_is_rejected(client):
     body = {
         "base": base_payload(),

@@ -9,13 +9,25 @@ Usage
 2. Run this script:
      python examples/demo_request.py                     # calls http://localhost:8000
      python examples/demo_request.py --base-url http://host:8000 --out examples/out
+     python examples/demo_request.py --scene reselect    # base-visibility demo
 
 It writes ``request.json`` (ready to POST with curl), plus the composed image
 and the per-instance visible masks, and prints the chosen placements.
 
-The synthetic scene: a 320x240 shelf with two annotated regions; four product
-patches with non-rectangular masks, each offering several candidate top-left
-positions - including ones that hang over the canvas edge.
+Scenes
+------
+``shelf`` (default)
+    A 320x240 shelf with two annotated regions; four product patches with
+    non-rectangular masks, each offering several candidate top-left positions
+    - including ones that hang over the canvas edge.
+
+``reselect``
+    A scene that demonstrates the base-instance visibility floor. The single
+    patch has two attractive candidates: one completely hides a tiny annotated
+    jar while touching nothing else, the other clips a corner off a large
+    annotated box. The first covers fewer annotated pixels (256 vs 1152), but
+    it would leave the jar 0/256 visible, so it must be rejected and the
+    service must pick the second.
 """
 
 from __future__ import annotations
@@ -105,10 +117,57 @@ def build_request() -> dict:
         ("box", [(120, 150), (100, 148), (160, 150), (250, 150), (300, 140)]),
         ("bag", [(200, 60), (40, 190), (150, 188), (280, 60)]),
     ]
+    return _request_from(base_image, base_masks, specs)
 
+
+def reselect_base() -> tuple[np.ndarray, list[np.ndarray]]:
+    """A 320x240 shelf with a tiny jar and a large annotated box."""
+
+    height, width = 240, 320
+    image = np.zeros((height, width, 3), dtype=np.uint8)
+    image[:, :] = (58, 62, 70)
+    for y in (90, 180, 235):
+        image[max(0, y - 4) : y, :] = (96, 92, 84)
+
+    jar = np.zeros((height, width), dtype=bool)
+    jar[16:32, 16:32] = True  # 16x16 = 256 px, top-left corner
+    image[jar] = (150, 150, 140)
+
+    box = np.zeros((height, width), dtype=bool)
+    box[100:164, 224:300] = True  # 64x76 = 4864 px, middle-right
+    image[box] = (128, 104, 84)
+    return image, [jar, box]
+
+
+def reselect_request() -> dict:
+    """One patch, two candidates: hide the jar (cheapest) or clip the box.
+
+    Candidate (0, 0) covers the 256-pixel jar completely (and no other
+    annotation), so it has the lower total coverage. Candidate (228, 124)
+    hides 38x44 = 1672 pixels of the 4864-pixel box, leaving 65.6 % visible.
+    The jar would keep 0/256, so the cheaper placement must be excluded and
+    the service must choose (228, 124) even though it covers more pixels.
+    """
+
+    image = np.full((48, 48, 3), (200, 80, 60), dtype=np.uint8)
+    image[6:42, 6:42] = (228, 110, 88)
+    mask = np.zeros((48, 48), dtype=bool)
+    mask[2:46, 2:46] = True  # 44x44 = 1936 px
+
+    base_image, base_masks = reselect_base()
+    return _request_from(
+        base_image,
+        base_masks,
+        [("reselect", [(0, 0), (228, 124)])],
+        overrides={"reselect": (image, mask)},
+    )
+
+
+def _request_from(base_image, base_masks, specs, overrides=None) -> dict:
+    overrides = overrides or {}
     patches = []
     for kind, candidates in specs:
-        image, mask = product(kind)
+        image, mask = overrides.get(kind) or product(kind)
         patches.append(
             {
                 "image_b64": b64_png(image),
@@ -127,7 +186,6 @@ def build_request() -> dict:
         "patches": patches,
     }
 
-
 def save_response(response: dict, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     if response.get("status") != "ok":
@@ -141,6 +199,8 @@ def save_response(response: dict, out_dir: Path) -> None:
     decode(response["composed_image_b64"]).save(out_dir / "composed.png")
     for index, instance in enumerate(response["instances"]):
         decode(instance["visible_mask_b64"]).save(out_dir / f"instance_{index}_visible.png")
+    for index, item in enumerate(response.get("base_instances", [])):
+        decode(item["visible_mask_b64"]).save(out_dir / f"base_{index}_visible.png")
     (out_dir / "response.json").write_text(json.dumps(response, indent=2))
 
     print(f"wrote {out_dir / 'composed.png'}")
@@ -150,6 +210,12 @@ def save_response(response: dict, out_dir: Path) -> None:
             f"visible={instance['visible_pixels']}/{instance['original_mask_pixels']} "
             f"({instance['visible_ratio']:.1%})"
         )
+    for item in response.get("base_instances", []):
+        ratio = item["visible_pixels"] / item["original_mask_pixels"]
+        print(
+            f"  base {item['base_index']}: visible="
+            f"{item['visible_pixels']}/{item['original_mask_pixels']} ({ratio:.1%})"
+        )
     print("  overlapped annotated base pixels:", response["overlapped_base_pixels"])
 
 
@@ -158,13 +224,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-url", default="http://localhost:8000")
     parser.add_argument("--out", type=Path, default=HERE / "out")
     parser.add_argument(
+        "--scene",
+        choices=("shelf", "reselect"),
+        default="shelf",
+        help="'shelf' is the four-patch scene; 'reselect' demonstrates the "
+        "base-instance visibility floor changing the chosen placement.",
+    )
+    parser.add_argument(
         "--offline",
         action="store_true",
         help="Only write request.json; do not call the API.",
     )
     args = parser.parse_args(argv)
 
-    request = build_request()
+    request = reselect_request() if args.scene == "reselect" else build_request()
     args.out.mkdir(parents=True, exist_ok=True)
     request_path = args.out / "request.json"
     request_path.write_text(json.dumps(request))

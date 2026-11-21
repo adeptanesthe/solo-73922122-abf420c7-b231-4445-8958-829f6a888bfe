@@ -12,6 +12,7 @@ services:
       MAX_REQUEST_BYTES: "33554432"
       MAX_BASE_INSTANCES: "64"
       MIN_VISIBLE_RATIO: "1/2"
+      MIN_BASE_VISIBLE_RATIO: "1/2"
     restart: unless-stopped
     healthcheck:
       test:

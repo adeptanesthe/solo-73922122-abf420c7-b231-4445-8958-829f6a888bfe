@@ -27,8 +27,9 @@ class BaseImage(BaseModel):
         description=(
             "One base64 mask per annotated shelf instance, each aligned "
             "pixel-for-pixel with the base image and pairwise non-overlapping. "
-            "Their pixels are the annotated pixels the placement search tries "
-            "hardest not to cover. May be empty when the base has no annotations."
+            "Each instance keeps at least half of its original mask area in "
+            "the composite; placements that would hide more are rejected. May "
+            "be empty when the base has no annotations."
         ),
     )
 
@@ -110,13 +111,18 @@ class BaseInstanceSummary(BaseModel):
     """How much of a pre-annotated base instance remains visible."""
 
     base_index: int = Field(..., ge=0, description="Index into base.instance_masks.")
-    visible_pixels: int = Field(..., ge=0)
-    original_mask_pixels: int = Field(..., ge=1)
+    visible_pixels: int = Field(
+        ..., ge=0, description="Unoccluded, in-canvas pixels of this base instance."
+    )
+    original_mask_pixels: int = Field(
+        ..., ge=1, description="Area of the base instance mask as submitted."
+    )
     visible_mask_b64: str = Field(
         ...,
         description=(
             "Base64 canvas-sized 8-bit PNG: 255 where this base instance stays "
-            "visible after pasting, 0 elsewhere. Disjoint from the patch masks."
+            "visible after pasting, 0 elsewhere. Disjoint from the patch masks. "
+            "Always at least half of original_mask_pixels."
         ),
     )
 
@@ -133,7 +139,11 @@ class ComposeResponse(BaseModel):
     )
     base_instances: list[BaseInstanceSummary] = Field(
         ...,
-        description="Visibility of the pre-annotated base instances, for auditing.",
+        description=(
+            "Visibility of the pre-annotated base instances. Each one keeps at "
+            "least half of its mask area; the placement search rejects "
+            "combinations that would cover more of any single instance."
+        ),
     )
     overlapped_base_pixels: int = Field(
         ...,
