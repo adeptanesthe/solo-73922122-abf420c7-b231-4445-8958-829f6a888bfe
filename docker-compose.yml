@@ -1,0 +1,28 @@
+services:
+  compositor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: shelf-compositor:1.0.0
+    ports:
+      - "${HOST_PORT:-8000}:8000"
+    environment:
+      MAX_IMAGE_BYTES: "4194304"
+      MAX_IMAGE_PIXELS: "4194304"
+      MAX_REQUEST_BYTES: "33554432"
+      MAX_BASE_INSTANCES: "64"
+      MIN_VISIBLE_RATIO: "1/2"
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import sys, urllib.request;
+          sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health',
+          timeout=2).status == 200 else 1)
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
